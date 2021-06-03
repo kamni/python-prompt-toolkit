@@ -38,6 +38,7 @@ from .containers import ConditionalContainer, HSplit, ScrollOffsets, Window
 from .controls import GetLinePrefixCallable, UIContent, UIControl
 from .dimension import Dimension
 from .margins import ScrollbarMargin
+from .wrap import WrapStyle
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding.key_bindings import KeyBindings
@@ -85,6 +86,7 @@ class CompletionsMenuControl(UIControl):
         width: int,
         max_available_height: int,
         wrap_lines: bool,
+        wrap_style: WrapStyle,
         get_line_prefix: Optional[GetLinePrefixCallable],
     ) -> Optional[int]:
 
@@ -375,6 +377,7 @@ class MultiColumnCompletionMenuControl(UIControl):
         width: int,
         max_available_height: int,
         wrap_lines: bool,
+        wrap_style: WrapStyle,
         get_line_prefix: Optional[GetLinePrefixCallable],
     ) -> Optional[int]:
         """
@@ -689,6 +692,7 @@ class _SelectedCompletionMetaControl(UIControl):
         width: int,
         max_available_height: int,
         wrap_lines: bool,
+        wrap_style: WrapStyle,
         get_line_prefix: Optional[GetLinePrefixCallable],
     ) -> Optional[int]:
         return 1

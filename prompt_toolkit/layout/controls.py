@@ -46,6 +46,7 @@ from .processors import (
     TransformationInput,
     merge_processors,
 )
+from .wrap import WrapStyle
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding.key_bindings import KeyBindingsBase
@@ -95,6 +96,7 @@ class UIControl(metaclass=ABCMeta):
         width: int,
         max_available_height: int,
         wrap_lines: bool,
+        wrap_style: WrapStyle,
         get_line_prefix: Optional[GetLinePrefixCallable],
     ) -> Optional[int]:
         return None
@@ -196,6 +198,7 @@ class UIContent:
         self,
         lineno: int,
         width: int,
+        wrap_style: WrapStyle,
         get_line_prefix: Optional[GetLinePrefixCallable],
         slice_stop: Optional[int] = None,
     ) -> int:
@@ -223,43 +226,101 @@ class UIContent:
             else:
                 # Calculate line width first.
                 line = fragment_list_to_text(self.get_line(lineno))[:slice_stop]
-                text_width = get_cwidth(line)
 
-                if get_line_prefix:
-                    # Add prefix width.
-                    text_width += fragment_list_width(
-                        to_formatted_text(get_line_prefix(lineno, 0))
-                    )
+                if wrap_style == WrapStyle.ELLIPSIS:
+                    # It doesn't matter if we have a prompt or the text fits;
+                    # We'll overwrite whatever space we have
+                    height = 1
+                elif wrap_style == WrapStyle.CHAR:
+                    text_width = get_cwidth(line)
 
-                    # Slower path: compute path when there's a line prefix.
+                    if not get_line_prefix:
+                        # Fast path: compute height when there's no line prefix.
+                        try:
+                            quotient, remainder = divmod(text_width, width)
+                        except ZeroDivisionError:
+                            height = 10 ** 8
+                        else:
+                            if remainder:
+                                quotient += 1  # Like math.ceil.
+                            height = max(1, quotient)
+                    else:
+                        # Medium path: compute an easy wrap when there's
+                        # a line prefix
+
+                        # Add prefix width.
+                        text_width += fragment_list_width(
+                            to_formatted_text(get_line_prefix(lineno, 0))
+                        )
+
+                        height = 1
+
+                        # Keep wrapping as long as the line doesn't fit.
+                        # Keep adding new prefixes for every wrapped line.
+                        while text_width > width:
+                            height += 1
+                            text_width -= width
+
+                            prefix_width = get_cwidth(
+                                fragment_list_to_text(
+                                    to_formatted_text(
+                                        get_line_prefix(lineno, height - 1)
+                                    ),
+                                ),
+                            )
+
+                            if prefix_width >= width:  # Prefix doesn't fit.
+                                height = 10 ** 8
+                                break
+
+                            text_width += prefix_width
+                elif wrap_style == WrapStyle.WORD:
                     height = 1
 
-                    # Keep wrapping as long as the line doesn't fit.
-                    # Keep adding new prefixes for every wrapped line.
-                    while text_width > width:
-                        height += 1
-                        text_width -= width
+                    text_width = 0
+                    last_space_width = -1
+                    new_line = True
 
-                        fragments2 = to_formatted_text(
-                            get_line_prefix(lineno, height - 1)
-                        )
-                        prefix_width = get_cwidth(fragment_list_to_text(fragments2))
+                    # Keep wrapping until we run out of text, adding a prefix
+                    # as necessary
+                    for cr in line:
+                        if new_line:
+                            new_line = False
 
-                        if prefix_width >= width:  # Prefix doesn't fit.
-                            height = 10 ** 8
-                            break
+                            # Add prefix width.
+                            if get_line_prefix:
+                                prefix = fragment_list_to_text(
+                                    get_line_prefix(lineno, height - 1),
+                                )
+                                prefix_width = get_cwidth(prefix)
 
-                        text_width += prefix_width
+                                if prefix_width >= width: # Prefix doesn't fit.
+                                    height = 10 ** 8
+                                    break
+
+                                text_width += prefix_width
+
+                        cwidth = get_cwidth(cr)
+                        if text_width + cwidth > width:
+                            height += 1
+                            new_line = True
+
+                            if cr.isspace():
+                                text_width = 0
+                            elif last_space_width == -1:
+                                text_width = max(0, text_width - width) + cwidth
+                            else:
+                                text_width = text_width - last_space_width + cwidth
+
+                            last_space_width = -1
+                        else:
+                            text_width += cwidth
+                            if cr.isspace():
+                                last_space_width = text_width
+
                 else:
-                    # Fast path: compute height when there's no line prefix.
-                    try:
-                        quotient, remainder = divmod(text_width, width)
-                    except ZeroDivisionError:
-                        height = 10 ** 8
-                    else:
-                        if remainder:
-                            quotient += 1  # Like math.ceil.
-                        height = max(1, quotient)
+                    # Something is weird; we shouldn't be here
+                    height = 10 ** 8
 
             # Cache and return
             self._line_heights_cache[key] = height
@@ -373,6 +434,7 @@ class FormattedTextControl(UIControl):
         width: int,
         max_available_height: int,
         wrap_lines: bool,
+        wrap_style: WrapStyle,
         get_line_prefix: Optional[GetLinePrefixCallable],
     ) -> Optional[int]:
         """
@@ -382,7 +444,12 @@ class FormattedTextControl(UIControl):
         if wrap_lines:
             height = 0
             for i in range(content.line_count):
-                height += content.get_height_for_line(i, width, get_line_prefix)
+                height += content.get_height_for_line(
+                    i,
+                    width,
+                    wrap_style,
+                    get_line_prefix,
+                )
                 if height >= max_available_height:
                     return max_available_height
             return height
@@ -640,6 +707,7 @@ class BufferControl(UIControl):
         width: int,
         max_available_height: int,
         wrap_lines: bool,
+        wrap_style: WrapStyle,
         get_line_prefix: Optional[GetLinePrefixCallable],
     ) -> Optional[int]:
 
@@ -659,7 +727,12 @@ class BufferControl(UIControl):
             return max_available_height
 
         for i in range(content.line_count):
-            height += content.get_height_for_line(i, width, get_line_prefix)
+            height += content.get_height_for_line(
+                i,
+                width,
+                wrap_style,
+                get_line_prefix,
+            )
 
             if height >= max_available_height:
                 return max_available_height

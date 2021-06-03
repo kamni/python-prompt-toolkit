@@ -8,6 +8,7 @@ from functools import partial
 from typing import (
     TYPE_CHECKING,
     Callable,
+    DefaultDict,
     Dict,
     List,
     Optional,
@@ -55,8 +56,9 @@ from .dimension import (
 )
 from .margins import Margin
 from .mouse_handlers import MouseHandlers
-from .screen import _CHAR_CACHE, Screen, WritePosition
+from .screen import _CHAR_CACHE, Char, Screen, WritePosition
 from .utils import explode_text_fragments
+from .wrap import WrapStyle
 
 if TYPE_CHECKING:
     from typing_extensions import Protocol
@@ -1330,7 +1332,10 @@ class WindowRenderInfo:
         """
         if self.wrap_lines:
             return self.ui_content.get_height_for_line(
-                lineno, self.window_width, self.window.get_line_prefix
+                lineno,
+                self.window_width,
+                self.window.wrap_style,
+                self.window.get_line_prefix,
             )
         else:
             return 1
@@ -1441,6 +1446,9 @@ class Window(Container):
         the body is hidden.
     :param wrap_lines: A `bool` or :class:`.Filter` instance. When True, don't
         scroll horizontally, but wrap lines instead.
+    :param wrap_style: A value of `WrapStyle` that determines how the end of a
+        line will be handled (WORD, CHAR, ELLIPSIS). This is used in
+        conjunction with `wrap_lines=True`. Default is None.
     :param get_vertical_scroll: Callable that takes this window
         instance as input and returns a preferred vertical scroll.
         (When this is `None`, the scroll is only determined by the last and
@@ -1485,6 +1493,7 @@ class Window(Container):
         scroll_offsets: Optional[ScrollOffsets] = None,
         allow_scroll_beyond_bottom: FilterOrBool = False,
         wrap_lines: FilterOrBool = False,
+        wrap_style: WrapStyle = WrapStyle.CHAR,
         get_vertical_scroll: Optional[Callable[["Window"], int]] = None,
         get_horizontal_scroll: Optional[Callable[["Window"], int]] = None,
         always_hide_cursor: FilterOrBool = False,
@@ -1502,6 +1511,7 @@ class Window(Container):
         self.allow_scroll_beyond_bottom = to_filter(allow_scroll_beyond_bottom)
         self.always_hide_cursor = to_filter(always_hide_cursor)
         self.wrap_lines = to_filter(wrap_lines)
+        self.wrap_style = wrap_style
         self.cursorline = to_filter(cursorline)
         self.cursorcolumn = to_filter(cursorcolumn)
 
@@ -1626,6 +1636,7 @@ class Window(Container):
                 width - total_margin_width,
                 max_available_height,
                 wrap_lines,
+                self.wrap_style,
                 self.get_line_prefix,
             )
 
@@ -2019,6 +2030,50 @@ class Window(Container):
                 if line_width < width:
                     x += width - line_width
 
+            def write_to_buffer_row(
+                x: int,
+                y: int,
+                col: int,
+                char: Char,
+                buffer_row: DefaultDict[int, DefaultDict[int, str]],
+            ):
+                # Set character in screen and shift 'x'.
+                if x >= 0 and y >= 0 and x < write_position.width:
+                    buffer_row[x + xpos] = char
+
+                    # When we print a multi width character, make sure
+                    # to erase the neighbours positions in the screen.
+                    # (The empty string if different from everything,
+                    # so next redraw this cell will repaint anyway.)
+                    if char.width > 1:
+                        for i in range(1, char.width):
+                            buffer_row[x + xpos + i] = empty_char
+
+                    # If this is a zero width characters, then it's
+                    # probably part of a decomposed unicode character.
+                    # See: https://en.wikipedia.org/wiki/Unicode_equivalence
+                    # Merge it in the previous cell.
+                    elif char.width == 0:
+                        # Handle all character widths. If the previous
+                        # character is a multiwidth character, then
+                        # merge it two positions back.
+                        for pw in [2, 1]:  # Previous character width.
+                            if (
+                                x - pw >= 0
+                                and buffer_row[x + xpos - pw].width == pw
+                            ):
+                                prev_char = buffer_row[x + xpos - pw]
+                                char2 = _CHAR_CACHE[
+                                    prev_char.char + c, prev_char.style
+                                ]
+                                buffer_row[x + xpos - pw] = char2
+
+                    # Keep track of write position for each character.
+                    current_rowcol_to_yx[lineno, col + skipped] = (
+                        y + ypos,
+                        x + xpos,
+                    )
+
             col = 0
             wrap_count = 0
             for style, text, *_ in line:
@@ -2030,12 +2085,68 @@ class Window(Container):
                     new_screen.zero_width_escapes[y + ypos][x + xpos] += text
                     continue
 
+                # Keep track of chars for WORD and ELLIPSIS wrap
+                collected_chars = []
+                col_offset = col
+                last_space_x = -1
+                last_space_col = -1
+
                 for c in text:
                     char = _CHAR_CACHE[c, style]
                     char_width = char.width
+                    collected_chars.append(char)
 
                     # Wrap when the line width is exceeded.
                     if wrap_lines and x + char_width > width:
+                        # Replace last three characters with ellipsis. If the
+                        # last three characters are multi-width characters,
+                        # we'll get more than 3 dots, but this is fine
+                        if self.wrap_style == WrapStyle.ELLIPSIS:
+                            dot = _CHAR_CACHE['.', style]
+                            alt_x = x
+                            # Writing backwards from end of line
+                            for icol in range(col, col - 4, -1):
+                                try:
+                                    prev_char = collected_chars[icol - col_offset]
+                                except IndexError:
+                                    # Line is not wide enough
+                                    break
+
+                                for pw in range(prev_char.width):
+                                    new_x = alt_x - pw
+                                    if new_x < 0:
+                                        break
+
+                                    write_to_buffer_row(
+                                        x=new_x,
+                                        y=y,
+                                        col=icol,
+                                        char=dot,
+                                        buffer_row=new_buffer_row,
+                                    )
+                                alt_x -= prev_char.width
+
+                            # Break out of any further loops
+                            return x, y
+
+                        if (
+                            self.wrap_style == WrapStyle.WORD
+                            and last_space_col > -1
+                        ):
+                            space = _CHAR_CACHE[' ', style]
+                            alt_x = last_space_x
+                            for icol in range(last_space_col, col + 1):
+                                prev_char = collected_chars[icol - col_offset]
+                                for pw in range(prev_char.width):
+                                    write_to_buffer_row(
+                                        x=alt_x,
+                                        y=y,
+                                        col=icol,
+                                        char=space,
+                                        buffer_row=new_buffer_row,
+                                    )
+                                alt_x += prev_char.width
+
                         visible_line_to_row_col[y + 1] = (
                             lineno,
                             visible_line_to_row_col[y][1] + x,
@@ -2056,42 +2167,36 @@ class Window(Container):
                         if y >= write_position.height:
                             return x, y  # Break out of all for loops.
 
-                    # Set character in screen and shift 'x'.
-                    if x >= 0 and y >= 0 and x < write_position.width:
-                        new_buffer_row[x + xpos] = char
+                        # For WORD wrap, we need to insert the characters we
+                        # previously removed.
+                        if (
+                            self.wrap_style == WrapStyle.WORD
+                            and last_space_col > -1
+                        ):
+                            # This doesn't work so well if for some
+                            # reason the prompt plus the wrapped text is more
+                            # than the line width; unlikely to happen, but
+                            # good to note for possible future improvements
+                            for icol in range(last_space_col + 1, col):
+                                prev_char = collected_chars[icol - col_offset]
+                                write_to_buffer_row(
+                                    x,
+                                    y,
+                                    icol,
+                                    prev_char,
+                                    new_buffer_row,
+                                )
+                                x += prev_char.width
 
-                        # When we print a multi width character, make sure
-                        # to erase the neighbours positions in the screen.
-                        # (The empty string if different from everything,
-                        # so next redraw this cell will repaint anyway.)
-                        if char_width > 1:
-                            for i in range(1, char_width):
-                                new_buffer_row[x + xpos + i] = empty_char
+                            last_space_x = -1
+                            last_space_col = -1
 
-                        # If this is a zero width characters, then it's
-                        # probably part of a decomposed unicode character.
-                        # See: https://en.wikipedia.org/wiki/Unicode_equivalence
-                        # Merge it in the previous cell.
-                        elif char_width == 0:
-                            # Handle all character widths. If the previous
-                            # character is a multiwidth character, then
-                            # merge it two positions back.
-                            for pw in [2, 1]:  # Previous character width.
-                                if (
-                                    x - pw >= 0
-                                    and new_buffer_row[x + xpos - pw].width == pw
-                                ):
-                                    prev_char = new_buffer_row[x + xpos - pw]
-                                    char2 = _CHAR_CACHE[
-                                        prev_char.char + c, prev_char.style
-                                    ]
-                                    new_buffer_row[x + xpos - pw] = char2
+                    # Tracking for WORD wrap
+                    if str(char.char).isspace():
+                        last_space_x = x
+                        last_space_col = col
 
-                        # Keep track of write position for each character.
-                        current_rowcol_to_yx[lineno, col + skipped] = (
-                            y + ypos,
-                            x + xpos,
-                        )
+                    write_to_buffer_row(x, y, col, char, new_buffer_row)
 
                     col += 1
                     x += char_width
@@ -2346,7 +2451,12 @@ class Window(Container):
         self.horizontal_scroll = 0
 
         def get_line_height(lineno: int) -> int:
-            return ui_content.get_height_for_line(lineno, width, self.get_line_prefix)
+            return ui_content.get_height_for_line(
+                lineno,
+                width,
+                self.wrap_style,
+                self.get_line_prefix,
+            )
 
         # When there is no space, reset `vertical_scroll_2` to zero and abort.
         # This can happen if the margin is bigger than the window width.
@@ -2370,6 +2480,7 @@ class Window(Container):
             text_before_height = ui_content.get_height_for_line(
                 ui_content.cursor_position.y,
                 width,
+                self.wrap_style,
                 self.get_line_prefix,
                 slice_stop=ui_content.cursor_position.x,
             )
