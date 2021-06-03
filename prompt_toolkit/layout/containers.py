@@ -262,6 +262,9 @@ class HSplit(_Split):
     :param height: When given, use this height instead of looking at the children.
     :param z_index: (int or None) When specified, this can be used to bring
         element in front of floating elements.  `None` means: inherit from parent.
+    :param dont_extend_child_height: When `True`, don't extend the height of
+        children to take up the full height of the container; use the child's
+        prefered height instead. `False` by default.
     :param style: A style string.
     :param modal: ``True`` or ``False``.
     :param key_bindings: ``None`` or a :class:`.KeyBindings` object.
@@ -282,6 +285,7 @@ class HSplit(_Split):
         width: AnyDimension = None,
         height: AnyDimension = None,
         z_index: Optional[int] = None,
+        dont_extend_child_height: bool = False,
         modal: bool = False,
         key_bindings: Optional[KeyBindingsBase] = None,
         style: Union[str, Callable[[], str]] = "",
@@ -302,6 +306,7 @@ class HSplit(_Split):
         )
 
         self.align = align
+        self.dont_extend_child_height = dont_extend_child_height
 
         self._children_cache: SimpleCache[
             Tuple[Container, ...], List[Container]
@@ -464,7 +469,11 @@ class HSplit(_Split):
             i = next(child_generator)
 
         # Increase until we use all the available space. (or until "max")
-        if not get_app().is_done:
+        if (
+            not get_app().is_done
+            and self.align == VerticalAlign.JUSTIFY
+            or not self.dont_extend_child_height
+        ):
             max_stop = min(height, sum_dimensions.max)
             max_dimensions = [d.max for d in dimensions]
 
