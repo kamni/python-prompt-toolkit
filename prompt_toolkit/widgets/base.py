@@ -71,12 +71,14 @@ from prompt_toolkit.layout.processors import (
     PasswordProcessor,
     Processor,
 )
+from prompt_toolkit.layout.wrap import WrapStyle
 from prompt_toolkit.lexers import DynamicLexer, Lexer
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.validation import DynamicValidator, Validator
 
 from .toolbars import SearchToolbar
+
 
 __all__ = [
     "TextArea",
@@ -141,6 +143,8 @@ class TextArea:
     :param input_processors: `None` or a list of
         :class:`~prompt_toolkit.layout.Processor` objects.
     :param validator: `None` or a :class:`~prompt_toolkit.validation.Validator`
+        object
+    :param key_bindings: a :class:`~prompt_toolkit.key_binding.KeyBindings` 
         object.
 
     Window attributes:
@@ -148,6 +152,8 @@ class TextArea:
     :param lexer: :class:`~prompt_toolkit.lexers.Lexer` instance for syntax
         highlighting.
     :param wrap_lines: When `True`, don't scroll horizontally, but wrap lines.
+    :param wrap_style: How the window should wrap, if wrapped.
+        (:class:`~prompt_toolkit.layout.wrap.WrapStyle`)
     :param width: Window width. (:class:`~prompt_toolkit.layout.Dimension` object.)
     :param height: Window height. (:class:`~prompt_toolkit.layout.Dimension` object.)
     :param scrollbar: When `True`, display a scroll bar.
@@ -181,7 +187,9 @@ class TextArea:
         history: Optional[History] = None,
         focusable: FilterOrBool = True,
         focus_on_click: FilterOrBool = False,
+        key_bindings: Optional[KeyBindings] = None,
         wrap_lines: FilterOrBool = True,
+        wrap_style: WrapStyle = WrapStyle.CHAR,
         read_only: FilterOrBool = False,
         width: AnyDimension = None,
         height: AnyDimension = None,
@@ -245,6 +253,7 @@ class TextArea:
             preview_search=preview_search,
             focusable=focusable,
             focus_on_click=focus_on_click,
+            key_bindings=key_bindings,
         )
 
         if multiline:
@@ -275,6 +284,7 @@ class TextArea:
             content=self.control,
             style=style,
             wrap_lines=Condition(lambda: is_true(self.wrap_lines)),
+            wrap_style=wrap_style,
             left_margins=left_margins,
             right_margins=right_margins,
             get_line_prefix=get_line_prefix,
